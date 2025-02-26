@@ -132,7 +132,7 @@ EOF
   echo
 fi
 
-# Function to read config value
+# Function to get config value
 get_config() {
   local key=$1
   local default=$2
@@ -153,6 +153,19 @@ get_config() {
     else
       echo "$value"
     fi
+  fi
+}
+
+# Function to get boolean config value (returns true/false)
+get_bool_config() {
+  local key=$1
+  local default=$2
+  
+  local value=$(get_config "$key" "$default")
+  if [[ "$value" == "true" || "$value" == "1" || "$value" == "yes" || "$value" == "y" ]]; then
+    echo "true"
+  else
+    echo "false"
   fi
 }
 
