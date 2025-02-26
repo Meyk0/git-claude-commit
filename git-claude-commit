@@ -1,0 +1,401 @@
+#!/bin/bash
+# git-claude-commit: A git extension to generate commit messages using Claude
+# https://github.com/yourusername/git-claude-commit
+
+set -e
+
+VERSION="0.1.0"
+CONFIG_DIR="$HOME/.git-claude-commit"
+CONFIG_FILE="$CONFIG_DIR/config.json"
+DEFAULT_MODEL="claude-3-7-sonnet-20250219"
+DEFAULT_MAX_DIFF_SIZE=20000
+DEFAULT_PROMPT_TEMPLATE="I'm about to commit the following code changes. Please generate a concise and informative commit message that summarizes what these changes do. The commit message should follow best practices (50-72 chars for the first line, then a blank line, then more details if needed).\n\nChanges to be committed:\n{diff}"
+
+# ANSI color codes
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+# Command line options
+AUTO_ACCEPT=false
+FORCE_EDIT=false
+VERBOSE=false
+SPECIFIED_MODEL=""
+HELP=false
+
+# Function to display help message
+show_help() {
+  echo -e "${CYAN}git-claude-commit ${VERSION}${NC}"
+  echo "A git extension that uses Claude AI to generate commit messages based on your code changes."
+  echo
+  echo -e "Usage: ${GREEN}git claude-commit [options]${NC}"
+  echo
+  echo "Options:"
+  echo "  -y, --yes           Automatically accept the generated message"
+  echo "  -e, --edit          Open editor to modify the generated message"
+  echo "  -m, --model MODEL   Specify Claude model to use"
+  echo "  -v, --verbose       Show detailed output"
+  echo "  -h, --help          Show this help message"
+  echo
+  echo "Configuration file: $CONFIG_FILE"
+  echo
+  echo "Report issues at: https://github.com/yourusername/git-claude-commit/issues"
+  exit 0
+}
+
+# Function to log verbose messages
+log_verbose() {
+  if [ "$VERBOSE" = true ]; then
+    echo -e "${BLUE}[INFO]${NC} $1"
+  fi
+}
+
+# Function to log errors
+log_error() {
+  echo -e "${RED}[ERROR]${NC} $1" >&2
+}
+
+# Function to log success
+log_success() {
+  echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+# Function to log warnings
+log_warning() {
+  echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+# Parse command line arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -y|--yes)
+      AUTO_ACCEPT=true
+      shift
+      ;;
+    -e|--edit)
+      FORCE_EDIT=true
+      shift
+      ;;
+    -m|--model)
+      SPECIFIED_MODEL="$2"
+      shift
+      shift
+      ;;
+    -v|--verbose)
+      VERBOSE=true
+      shift
+      ;;
+    -h|--help)
+      HELP=true
+      shift
+      ;;
+    *)
+      log_error "Unknown option: $1"
+      show_help
+      exit 1
+      ;;
+  esac
+done
+
+if [ "$HELP" = true ]; then
+  show_help
+fi
+
+# Create config directory if it doesn't exist
+if [ ! -d "$CONFIG_DIR" ]; then
+  log_verbose "Creating config directory: $CONFIG_DIR"
+  mkdir -p "$CONFIG_DIR"
+fi
+
+# Create default config if it doesn't exist
+if [ ! -f "$CONFIG_FILE" ]; then
+  log_verbose "Creating default config file: $CONFIG_FILE"
+  cat > "$CONFIG_FILE" << EOF
+{
+  "api_key": "",
+  "model": "$DEFAULT_MODEL",
+  "prompt_template": "$DEFAULT_PROMPT_TEMPLATE",
+  "commit_conventions": "conventional commits style with type and scope",
+  "max_diff_size": $DEFAULT_MAX_DIFF_SIZE,
+  "use_emoji": false,
+  "emoji_style": "github",
+  "mask_secrets": true
+}
+EOF
+  log_warning "Config file created at $CONFIG_FILE"
+  log_warning "Please add your Anthropic API key to this file"
+  echo "You can get an API key from: https://console.anthropic.com/"
+  echo
+fi
+
+# Function to read config value
+get_config() {
+  local key=$1
+  local default=$2
+  
+  # Check if jq is installed
+  if command -v jq >/dev/null 2>&1; then
+    local value=$(jq -r ".$key // \"\"" "$CONFIG_FILE" 2>/dev/null)
+    if [ -z "$value" ] || [ "$value" = "null" ]; then
+      echo "$default"
+    else
+      echo "$value"
+    fi
+  else
+    # Fallback to grep if jq is not available
+    local value=$(grep -o "\"$key\": *\"[^\"]*\"" "$CONFIG_FILE" 2>/dev/null | sed "s/\"$key\": *\"//;s/\"//")
+    if [ -z "$value" ]; then
+      echo "$default"
+    else
+      echo "$value"
+    fi
+  fi
+}
+
+# Read configuration
+API_KEY=$(get_config "api_key" "")
+MODEL=$(get_config "model" "$DEFAULT_MODEL")
+PROMPT_TEMPLATE=$(get_config "prompt_template" "$DEFAULT_PROMPT_TEMPLATE")
+MAX_DIFF_SIZE=$(get_config "max_diff_size" "$DEFAULT_MAX_DIFF_SIZE")
+USE_EMOJI=$(get_bool_config "use_emoji" "false")
+EMOJI_STYLE=$(get_config "emoji_style" "github")
+MASK_SECRETS=$(get_bool_config "mask_secrets" "true")
+
+# Override with command line options if specified
+if [ ! -z "$SPECIFIED_MODEL" ]; then
+  MODEL="$SPECIFIED_MODEL"
+fi
+
+# Check for API key
+if [ -z "$API_KEY" ]; then
+    log_error "No API key found. Please set your Anthropic API key in $CONFIG_FILE"
+    exit 1
+fi
+
+# Get files that are staged for commit
+staged_files=$(git diff --cached --name-only)
+
+if [ -z "$staged_files" ]; then
+    log_error "No files staged for commit."
+    echo "Stage files with 'git add' before using this command."
+    exit 1
+fi
+
+# Get the diff content for each staged file
+log_verbose "Getting diffs for staged files..."
+diff_content=""
+for file in $staged_files; do
+    # Skip binary files
+    if git diff --cached --name-only -z "$file" | tr -d '\000' | grep -q "$file"; then
+        file_diff=$(git diff --cached "$file")
+        if [ ! -z "$file_diff" ]; then
+            diff_content+="File: $file\n$file_diff\n\n"
+            log_verbose "Added diff for $file"
+        fi
+    else
+        log_verbose "Skipped binary file: $file"
+    fi
+done
+
+# Function to mask sensitive information in diffs
+mask_sensitive_data() {
+    local content="$1"
+    local masked_content="$content"
+    
+    if [ "$MASK_SECRETS" = true ]; then
+        log_verbose "Masking sensitive information in diff..."
+        
+        # Mask API keys, tokens, and secrets
+        masked_content=$(echo "$masked_content" | sed -E 's/([^a-zA-Z])(api[_-]?key|api[_-]?secret|access[_-]?token|secret[_-]?key|password|token)[^a-zA-Z]*[=:][^a-zA-Z]*["'\''`]?[a-zA-Z0-9_\.\-\+\/=]{8,}["'\''`]?/\1\2\=\"***MASKED***\"/gi')
+        
+        # Mask AWS keys
+        masked_content=$(echo "$masked_content" | sed -E 's/([^a-zA-Z])(aws[_-]?access[_-]?key[_-]?id)[^a-zA-Z]*[=:][^a-zA-Z]*["'\''`]?[A-Z0-9]{20}["'\''`]?/\1\2\=\"***MASKED***\"/gi')
+        masked_content=$(echo "$masked_content" | sed -E 's/([^a-zA-Z])(aws[_-]?secret[_-]?access[_-]?key)[^a-zA-Z]*[=:][^a-zA-Z]*["'\''`]?[A-Za-z0-9\/\+]{40}["'\''`]?/\1\2\=\"***MASKED***\"/gi')
+        
+        # Mask private keys
+        masked_content=$(echo "$masked_content" | sed -E 's/-----BEGIN( RSA)? PRIVATE KEY-----.*-----END( RSA)? PRIVATE KEY-----/-----BEGIN PRIVATE KEY-----***MASKED***-----END PRIVATE KEY-----/gs')
+        
+        # Mask environment variables that likely contain secrets
+        masked_content=$(echo "$masked_content" | sed -E 's/([^a-zA-Z])(DB_PASSWORD|DATABASE_URL|ENCRYPTION_KEY)[^a-zA-Z]*[=:][^a-zA-Z]*["'\''`]?[a-zA-Z0-9_\.\-\+\/=]{8,}["'\''`]?/\1\2\=\"***MASKED***\"/gi')
+    fi
+    
+    echo "$masked_content"
+}
+
+# Truncate if the diff is too large (API limits)
+diff_length=${#diff_content}
+if [ $diff_length -gt $MAX_DIFF_SIZE ]; then
+    log_warning "Diff content too large ($diff_length chars), truncating to $MAX_DIFF_SIZE chars"
+    diff_content="${diff_content:0:$MAX_DIFF_SIZE}...(truncated)"
+fi
+
+# Mask sensitive information
+diff_content=$(mask_sensitive_data "$diff_content")
+
+# Create the prompt for Claude by replacing {diff} in the template
+prompt=${PROMPT_TEMPLATE/\{diff\}/$diff_content}
+
+# Call Claude API
+echo -e "🤔 ${CYAN}Generating commit message with Claude...${NC}"
+log_verbose "Using model: $MODEL"
+log_verbose "Sending request to Anthropic API..."
+
+response=$(curl -s "https://api.anthropic.com/v1/messages" \
+    -H "Content-Type: application/json" \
+    -H "x-api-key: $API_KEY" \
+    -H "anthropic-version: 2023-06-01" \
+    --data-binary @- << EOF
+{
+    "model": "$MODEL",
+    "max_tokens": 1000,
+    "messages": [
+        {
+            "role": "user",
+            "content": "$prompt"
+        }
+    ]
+}
+EOF
+)
+
+# Handle API errors
+if echo "$response" | grep -q "\"error\""; then
+    error_message=$(echo "$response" | grep -o '"error":.*"message":"[^"]*"' | sed 's/"error":.*"message":"//;s/"//g')
+    log_error "API error: $error_message"
+    if [ "$VERBOSE" = true ]; then
+        echo "Full response: $response"
+    fi
+    exit 1
+fi
+
+# Extract the commit message from the response
+commit_message=$(echo "$response" | grep -o '"content":"[^"]*"' | sed 's/"content":"//g' | sed 's/"//g')
+
+if [ -z "$commit_message" ]; then
+    log_error "Failed to generate commit message."
+    if [ "$VERBOSE" = true ]; then
+        echo "API Response: $response"
+    fi
+    exit 1
+fi
+
+# Clean up the message (remove any markdown formatting)
+commit_message=$(echo "$commit_message" | sed 's/```//g')
+
+# Function to add emoji prefixes to commit messages based on content
+add_emoji_prefix() {
+    local message="$1"
+    local first_line=$(echo "$message" | head -n 1)
+    local prefix=""
+    
+    # Check if message already starts with emoji
+    if [[ "$first_line" =~ ^:[a-z_]+: ]]; then
+        # Already has an emoji prefix
+        echo "$message"
+        return
+    fi
+    
+    # Detect the type of commit from the message
+    if [[ "$first_line" =~ ^feat: || "$first_line" =~ feature || "$first_line" =~ ^add ]]; then
+        prefix=":sparkles: "  # ✨ Feature
+    elif [[ "$first_line" =~ ^fix: || "$first_line" =~ ^bug ]]; then
+        prefix=":bug: "  # 🐛 Bug fix
+    elif [[ "$first_line" =~ ^docs: || "$first_line" =~ documentation ]]; then
+        prefix=":memo: "  # 📝 Documentation
+    elif [[ "$first_line" =~ ^style: || "$first_line" =~ formatting ]]; then
+        prefix=":art: "  # 🎨 Style/formatting
+    elif [[ "$first_line" =~ ^refactor: || "$first_line" =~ refactor ]]; then
+        prefix=":recycle: "  # ♻️ Refactoring
+    elif [[ "$first_line" =~ ^perf: || "$first_line" =~ performance ]]; then
+        prefix=":zap: "  # ⚡️ Performance
+    elif [[ "$first_line" =~ ^test: || "$first_line" =~ test ]]; then
+        prefix=":white_check_mark: "  # ✅ Tests
+    elif [[ "$first_line" =~ ^build: || "$first_line" =~ ^chore: || "$first_line" =~ dependency ]]; then
+        prefix=":package: "  # 📦 Build/dependencies
+    elif [[ "$first_line" =~ ^ci: || "$first_line" =~ pipeline || "$first_line" =~ workflow ]]; then
+        prefix=":construction_worker: "  # 👷 CI
+    elif [[ "$first_line" =~ security || "$first_line" =~ vulnerabilit ]]; then
+        prefix=":lock: "  # 🔒 Security
+    elif [[ "$first_line" =~ revert || "$first_line" =~ rollback ]]; then
+        prefix=":rewind: "  # ⏪ Revert
+    elif [[ "$first_line" =~ initial ]]; then
+        prefix=":tada: "  # 🎉 Initial commit
+    else
+        prefix=":pushpin: "  # 📌 General update
+    fi
+    
+    # Add the emoji prefix to the first line only
+    local rest_of_message=$(echo "$message" | tail -n +2)
+    echo "${prefix}${first_line}"
+    if [ ! -z "$rest_of_message" ]; then
+        echo "$rest_of_message"
+    fi
+}
+
+# Add emoji prefix if enabled
+if [ "$USE_EMOJI" = true ]; then
+    log_verbose "Adding emoji prefix to commit message..."
+    commit_message=$(add_emoji_prefix "$commit_message")
+fi
+
+# Ask user if they want to use the generated message
+echo -e "\n📝 ${CYAN}Generated commit message:${NC}\n"
+echo -e "$commit_message"
+echo -e "\n"
+
+if [ "$AUTO_ACCEPT" = true ]; then
+    choice="y"
+elif [ "$FORCE_EDIT" = true ]; then
+    choice="e"
+else
+    read -p "Use this commit message? (y/n/e for edit): " choice
+fi
+
+case "$choice" in
+    y|Y)
+        # Use the message as is
+        echo "$commit_message" > .git/COMMIT_EDITMSG
+        git commit -F .git/COMMIT_EDITMSG
+        log_success "Committed with Claude's message!"
+        ;;
+    e|E)
+        # Let the user edit the message
+        echo "$commit_message" > .git/COMMIT_EDITMSG
+        if [ -n "$EDITOR" ]; then
+            $EDITOR .git/COMMIT_EDITMSG
+        else
+            # Try common editors if $EDITOR is not set
+            if command -v nano >/dev/null 2>&1; then
+                nano .git/COMMIT_EDITMSG
+            elif command -v vim >/dev/null 2>&1; then
+                vim .git/COMMIT_EDITMSG
+            elif command -v vi >/dev/null 2>&1; then
+                vi .git/COMMIT_EDITMSG
+            else
+                log_error "No editor found. Please set the EDITOR environment variable."
+                exit 1
+            fi
+        fi
+        git commit -F .git/COMMIT_EDITMSG
+        log_success "Committed with edited message!"
+        ;;
+    *)
+        # Cancel
+        log_warning "Commit canceled. You can still commit manually with 'git commit'."
+        exit 0
+        ;;
+esac
+
+# Save this commit message for future reference/analysis
+HISTORY_FILE="$CONFIG_DIR/history.jsonl"
+timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+if [ -f "$HISTORY_FILE" ]; then
+    echo "{\"timestamp\":\"$timestamp\",\"message\":\"$commit_message\",\"model\":\"$MODEL\"}" >> "$HISTORY_FILE"
+    log_verbose "Saved commit message to history"
+fi
+
+exit 0
