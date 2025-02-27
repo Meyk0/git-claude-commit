@@ -173,6 +173,18 @@ EOF
     fi
 }
 
+# Add Fish shell support if Fish is installed
+if command -v fish >/dev/null 2>&1; then
+    echo_info "Detected Fish shell, installing Fish-specific support..."
+    mkdir -p "$HOME/.config/fish/functions"
+    if [[ -f "./shell/fish/git-claude-commit.fish" ]]; then
+        cp "./shell/fish/git-claude-commit.fish" "$HOME/.config/fish/functions/"
+        echo_success "Fish shell support installed with command completions"
+    else
+        echo_warning "Fish shell function file not found. Skipping Fish-specific setup."
+    fi
+fi
+
 # Main installation process
 main() {
     echo "=== git-claude-commit Installer ==="

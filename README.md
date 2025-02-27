@@ -116,3 +116,25 @@ Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Shell Support
+
+### Fish Shell
+If you're using Fish shell, git-claude-commit comes with built-in command completion support. This will be automatically installed if Fish is detected during installation.
+
+Features:
+- Tab completion for all options
+- Command descriptions
+- Automatic installation during setup
+
+The installer will automatically detect Fish shell and install the necessary completions. If you need to manually install Fish shell support:
+
+```bash
+mkdir -p ~/.config/fish/functions
+cp shell/fish/git-claude-commit.fish ~/.config/fish/functions/
+```
+
+Fish shell users will get:
+- Command completion for all options (-y, --yes, -e, --edit, etc.)
+- Option descriptions in completions
+- Seamless integration with Fish's completion system
