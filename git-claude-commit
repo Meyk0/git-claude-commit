@@ -1,13 +1,13 @@
 #!/bin/bash
 # git-claude-commit: A git extension to generate commit messages using Claude
-# https://github.com/yourusername/git-claude-commit
+# https://github.com/Meyk0/git-claude-commit
 
 set -e
 
 VERSION="0.1.0"
 CONFIG_DIR="$HOME/.git-claude-commit"
 CONFIG_FILE="$CONFIG_DIR/config.json"
-DEFAULT_MODEL="claude-3-7-sonnet-20250219"
+DEFAULT_MODEL="claude-3-7-sonnet-20240229"
 DEFAULT_MAX_DIFF_SIZE=20000
 DEFAULT_PROMPT_TEMPLATE="I'm about to commit the following code changes. Please generate a concise and informative commit message that summarizes what these changes do. The commit message should follow best practices (50-72 chars for the first line, then a blank line, then more details if needed).\n\nChanges to be committed:\n{diff}"
 
@@ -43,7 +43,7 @@ show_help() {
   echo
   echo "Configuration file: $CONFIG_FILE"
   echo
-  echo "Report issues at: https://github.com/yourusername/git-claude-commit/issues"
+  echo "Report issues at: https://github.com/Meyk0/git-claude-commit/issues"
   exit 0
 }
 
@@ -222,18 +222,11 @@ mask_sensitive_data() {
     if [ "$MASK_SECRETS" = true ]; then
         log_verbose "Masking sensitive information in diff..."
         
-        # Mask API keys, tokens, and secrets
-        masked_content=$(echo "$masked_content" | sed -E 's/([^a-zA-Z])(api[_-]?key|api[_-]?secret|access[_-]?token|secret[_-]?key|password|token)[^a-zA-Z]*[=:][^a-zA-Z]*["'\''`]?[a-zA-Z0-9_\.\-\+\/=]{8,}["'\''`]?/\1\2\=\"***MASKED***\"/gi')
-        
-        # Mask AWS keys
-        masked_content=$(echo "$masked_content" | sed -E 's/([^a-zA-Z])(aws[_-]?access[_-]?key[_-]?id)[^a-zA-Z]*[=:][^a-zA-Z]*["'\''`]?[A-Z0-9]{20}["'\''`]?/\1\2\=\"***MASKED***\"/gi')
-        masked_content=$(echo "$masked_content" | sed -E 's/([^a-zA-Z])(aws[_-]?secret[_-]?access[_-]?key)[^a-zA-Z]*[=:][^a-zA-Z]*["'\''`]?[A-Za-z0-9\/\+]{40}["'\''`]?/\1\2\=\"***MASKED***\"/gi')
-        
-        # Mask private keys
-        masked_content=$(echo "$masked_content" | sed -E 's/-----BEGIN( RSA)? PRIVATE KEY-----.*-----END( RSA)? PRIVATE KEY-----/-----BEGIN PRIVATE KEY-----***MASKED***-----END PRIVATE KEY-----/gs')
+        # Mask API keys, tokens, and secrets (simplified for macOS compatibility)
+        masked_content=$(echo "$masked_content" | sed -E 's/[a-zA-Z0-9_-]*(api|key|token|secret|password)[a-zA-Z0-9_-]*[ ]*[=:][ ]*["'\''`][a-zA-Z0-9_\.\-\+\/=]{8,}["'\''`]/***MASKED***/g')
         
         # Mask environment variables that likely contain secrets
-        masked_content=$(echo "$masked_content" | sed -E 's/([^a-zA-Z])(DB_PASSWORD|DATABASE_URL|ENCRYPTION_KEY)[^a-zA-Z]*[=:][^a-zA-Z]*["'\''`]?[a-zA-Z0-9_\.\-\+\/=]{8,}["'\''`]?/\1\2\=\"***MASKED***\"/gi')
+        masked_content=$(echo "$masked_content" | sed -E 's/(DB_PASSWORD|DATABASE_URL|ENCRYPTION_KEY)[ ]*[=:][ ]*["'\''`][a-zA-Z0-9_\.\-\+\/=]{8,}["'\''`]/\1=***MASKED***/g')
     fi
     
     echo "$masked_content"
@@ -250,7 +243,9 @@ fi
 diff_content=$(mask_sensitive_data "$diff_content")
 
 # Create the prompt for Claude by replacing {diff} in the template
+# Escape the prompt for JSON
 prompt=${PROMPT_TEMPLATE/\{diff\}/$diff_content}
+prompt_escaped=$(echo "$prompt" | python -c "import json, sys; print(json.dumps(sys.stdin.read()))" 2>/dev/null || echo "$prompt" | sed 's/"/\\"/g' | sed 's/\$/\\$/g' | sed 's/`/\\`/g' | sed 's/\\/\\\\/g')
 
 # Call Claude API
 echo -e "🤔 ${CYAN}Generating commit message with Claude...${NC}"
@@ -261,23 +256,20 @@ response=$(curl -s "https://api.anthropic.com/v1/messages" \
     -H "Content-Type: application/json" \
     -H "x-api-key: $API_KEY" \
     -H "anthropic-version: 2023-06-01" \
-    --data-binary @- << EOF
-{
-    "model": "$MODEL",
-    "max_tokens": 1000,
-    "messages": [
-        {
-            "role": "user",
-            "content": "$prompt"
-        }
-    ]
-}
-EOF
-)
+    -d "{
+        \"model\": \"$MODEL\",
+        \"max_tokens\": 1000,
+        \"messages\": [
+            {
+                \"role\": \"user\",
+                \"content\": $prompt_escaped
+            }
+        ]
+    }")
 
 # Handle API errors
 if echo "$response" | grep -q "\"error\""; then
-    error_message=$(echo "$response" | grep -o '"error":.*"message":"[^"]*"' | sed 's/"error":.*"message":"//;s/"//g')
+    error_message=$(echo "$response" | grep -o '"error":.*"message":"[^"]*"' | sed 's/"error":.*"message":"//;s/"//g' || echo "Unknown API error")
     log_error "API error: $error_message"
     if [ "$VERBOSE" = true ]; then
         echo "Full response: $response"
@@ -286,10 +278,16 @@ if echo "$response" | grep -q "\"error\""; then
 fi
 
 # Extract the commit message from the response
-commit_message=$(echo "$response" | grep -o '"content":"[^"]*"' | sed 's/"content":"//g' | sed 's/"//g')
+commit_message=$(echo "$response" | python -c "import json, sys; data = json.load(sys.stdin); print(data['content'][0]['text'])" 2>/dev/null)
+
+# If python failed, try a more compatible approach
+if [ -z "$commit_message" ]; then
+    commit_message=$(echo "$response" | grep -o '"text":"[^"]*"' | sed 's/"text":"//g' | sed 's/"$//g')
+fi
 
 if [ -z "$commit_message" ]; then
     log_error "Failed to generate commit message."
+    log_error "Could not parse the API response."
     if [ "$VERBOSE" = true ]; then
         echo "API Response: $response"
     fi

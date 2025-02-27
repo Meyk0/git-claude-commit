@@ -1,11 +1,11 @@
 # git-claude-commit 🤖✍️
 
-A Git extension that uses Claude AI to automatically generate commit messages based on your code changes.
+A Git extension that uses Anthropic's Claude AI to automatically generate commit messages based on your code changes.
 
 ## Features
 
 - 🔍 Analyzes your staged changes (`git add`) and generates descriptive commit messages
-- 🤖 Powered by Claude AI (Anthropic's advanced language model)
+- 🤖 Powered by Claude AI (Anthropic's advanced LLM)
 - ✏️ Interactive mode allows you to use, edit, or reject suggested messages
 - 🔧 Highly customizable through configuration
 - 🌐 Works on macOS, Linux, and Windows (WSL)
