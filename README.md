@@ -23,14 +23,14 @@ A Git extension that uses Anthropic's Claude AI to automatically generate commit
 ### Quick Install
 
 ```bash
-curl -s https://raw.githubusercontent.com/yourusername/git-claude-commit/main/install.sh | bash
+curl -s https://raw.githubusercontent.com/Meyk0/git-claude-commit/main/install.sh | bash
 ```
 
 ### Manual Installation
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/yourusername/git-claude-commit.git
+   git clone https://github.com/Meyk0/git-claude-commit.git
    ```
 
 2. Run the installation script:
@@ -50,7 +50,7 @@ curl -s https://raw.githubusercontent.com/yourusername/git-claude-commit/main/in
 After you've staged your changes with `git add`, simply run:
 
 ```bash
-git claude-commit
+git-claude-commit
 ```
 
 The script will:
